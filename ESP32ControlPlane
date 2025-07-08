@@ -1,0 +1,199 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <SD.h>
+#include <ArduinoJson.h>  
+
+// SD Card Pins
+#define SD_CS 5
+#define SD_MOSI 23
+#define SD_MISO 19
+#define SD_SCK 18
+
+// Login credentials (dummy)
+const char* username = "admin";
+const char* password = "admin";
+
+// Web Server & WiFi
+WebServer server(80);
+
+// ---------------- WIFI AP MODE ------------------
+void setupWiFiAP() {
+  WiFi.softAP("ESP32-IoT-Server", "12345678");
+  Serial.println("Access Point Started");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
+}
+
+// ---------------- SD CARD INIT ------------------
+void initSDCard() {
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS)) {
+    Serial.println("SD Card Mount Failed");
+    return;
+  }
+  Serial.println("SD Card Initialized.");
+}
+
+// ---------------- FILE SERVING ------------------
+String getContentType(String filename) {
+  if (filename.endsWith(".html")) return "text/html";
+  if (filename.endsWith(".css")) return "text/css";
+  if (filename.endsWith(".js")) return "application/javascript";
+  return "text/plain";
+}
+
+bool handleFileRead(String path) {
+  if (path.endsWith("/")) path += "login.html";  // default page
+  String contentType = getContentType(path);
+  String fullPath = "/web" + path;
+  if (SD.exists(fullPath)) {
+    File file = SD.open(fullPath, FILE_READ);
+    server.streamFile(file, contentType);
+    file.close();
+    return true;
+  }
+  return false;
+}
+
+// ---------------- API HANDLERS ------------------
+void handleLogin() {
+  if (server.method() == HTTP_POST) {
+    String user = server.arg("username");
+    String pass = server.arg("password");
+    if (user == username && pass == password) {
+      server.send(200, "application/json", "{\"success\":true, \"token\":\"dummy-token\"}");
+    } else {
+      server.send(401, "application/json", "{\"success\":false, \"message\":\"Invalid credentials\"}");
+    }
+  } else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+void handleDeviceConfig() {
+  if (server.method() == HTTP_POST) {
+    String body = server.arg("plain");
+
+    // Parse data device baru
+    StaticJsonDocument<256> newDevice;
+    DeserializationError error = deserializeJson(newDevice, body);
+    if (error) {
+      server.send(400, "application/json", "{\"success\":false, \"message\":\"Invalid JSON\"}");
+      return;
+    }
+
+    // Buka file yang ada
+    File file = SD.open("/config/devices.json", FILE_READ);
+    StaticJsonDocument<1024> data;
+
+    if (file) {
+      DeserializationError err = deserializeJson(data, file);
+      file.close();
+      if (err) {
+        data["devices"] = JsonArray(); // error → buat baru
+      }
+    } else {
+      data["devices"] = JsonArray(); // file tidak ada → buat baru
+    }
+
+    // Tambahkan device baru ke array
+    JsonArray devices = data["devices"].as<JsonArray>();
+    devices.add(newDevice);
+
+    // Simpan ulang
+    File saveFile = SD.open("/config/devices.json", FILE_WRITE);
+    if (!saveFile) {
+      server.send(500, "application/json", "{\"success\":false, \"message\":\"Save failed\"}");
+      return;
+    }
+
+    serializeJson(data, saveFile);
+    saveFile.close();
+
+    server.send(200, "application/json", "{\"success\":true}");
+  }
+
+  else if (server.method() == HTTP_GET) {
+    File file = SD.open("/config/devices.json", FILE_READ);
+    if (file) {
+      server.streamFile(file, "application/json");
+      file.close();
+    } else {
+      server.send(200, "application/json", "{\"devices\":[]}");
+    }
+  }
+
+  else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+
+void handleWiFiScan() {
+  int n = WiFi.scanNetworks();
+  if (n == 0) {
+    server.send(200, "application/json", "{\"devices\":[]}");
+    return;
+  }
+
+  String json = "{\"devices\":[";
+  for (int i = 0; i < n; i++) {
+    json += "{";
+    json += "\"name\":\"" + WiFi.SSID(i) + "\",";
+    json += "\"ip\":\"192.168.4.1\""; // Bisa diganti jika kamu ingin simulasikan IP tiap node
+    json += "}";
+    if (i < n - 1) json += ",";
+  }
+  json += "]}";
+
+  // Clear scan results
+  WiFi.scanDelete();
+  server.send(200, "application/json", json);
+}
+
+void handleFirmwareUpdate() {
+  File updateFile = SD.open("/firmware/firmware.bin", FILE_READ);
+  if (!updateFile) {
+    server.send(404, "text/plain", "Firmware not found");
+    return;
+  }
+  server.streamFile(updateFile, "application/octet-stream");
+  updateFile.close();
+}
+
+void handleFirmwareVersion() {
+  File versionFile = SD.open("/firmware/version.txt", FILE_READ);
+  if (!versionFile) {
+    server.send(404, "text/plain", "Version file not found");
+    return;
+  }
+  server.streamFile(versionFile, "text/plain");
+  versionFile.close();
+}
+
+
+// ---------------- SETUP & LOOP ------------------
+void setup() {
+  Serial.begin(115200);
+  setupWiFiAP();
+  initSDCard();
+
+  server.on("/firmware/version.txt", HTTP_GET, handleFirmwareVersion);
+  server.on("/firmware/firmware.bin", HTTP_GET, handleFirmwareUpdate);
+  server.on("/login", handleLogin);
+  server.on("/api/devices", handleDeviceConfig);
+  server.on("/api/scan", HTTP_POST, handleWiFiScan);
+  server.onNotFound([]() {
+    if (!handleFileRead(server.uri())) {
+      server.send(404, "text/plain", "File Not Found");
+    }
+  });
+
+  server.begin();
+  Serial.println("Web server started.");
+}
+
+void loop() {
+  server.handleClient();
+}
