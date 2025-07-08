@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Log Data Application</title>
+    <link rel="stylesheet" href="CSS/style.css" />
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-menu">
+            <a href="home.html" class="nav-item">Home</a>
+            <a href="scan.html" class="nav-item">Scan Device</a>
+            <a href="logdata.html" class="nav-item active">Log Data</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Home Page -->
+        <div id="home" class="page">
+            <div class="content">
+                <div class="page-content">
+                    <div class="feature-box">
+                        <h2>Welcome to Log Data Application</h2>
+                        <p>This application allows you to monitor and manage device data logs. Navigate through the tabs to access different features:</p>
+                        <br>
+                        <p><strong>Home:</strong> Overview and welcome page</p>
+                        <p><strong>Scan Device:</strong> Discover and connect to devices</p>
+                        <p><strong>Log Data:</strong> View and manage data logs from connected devices</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scan Device Page -->
+        <div id="scan-device" class="page">
+            <div class="content">
+                <div class="page-content">
+                    <div class="feature-box">
+                        <h2>Device Scanner</h2>
+                        <p><span class="status-indicator status-offline"></span>Scanner Status: Ready</p>
+                        <br>
+                        <p>Use this section to scan for available devices in your network. Once devices are discovered, you can connect to them to start logging data.</p>
+                        <br>
+                        <button class="connect-btn" onclick="scanDevices()">Start Scanning</button>
+                        <div id="scan-results" style="margin-top: 20px;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log Data Page -->
+        <div id="log-data" class="page active">
+            <div class="content">
+                <div class="page-header">
+                    <h1 class="page-title">Log Data</h1>
+                    <button class="connect-btn" onclick="connectWiFi()">Connect Wi-Fi</button>
+                </div>
+
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 20%;">Timestamp</th>
+                            <th style="width: 25%;">Device Name</th>
+                            <th style="width: 35%;">Data</th>
+                            <th style="width: 20%;">Data Size</th>
+                        </tr>
+                    </thead>
+                    <tbody id="data-table-body">
+                        <tr class="empty-row">
+                            <td colspan="4">
+                                <div class="empty-message">No data available. Connect a device to start logging data.</div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="JS/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home</title>
+    <link rel="stylesheet" href="CSS/style.css" />
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-menu">
+            <a href="home.html" class="nav-item active">Home</a>
+            <a href="scan.html" class="nav-item">Scan Device</a>
+            <a href="logdata.html" class="nav-item">Log Data</a>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container">
+        <div class="header">
+            <h1 class="page-title">Device Management</h1>
+            <div class="tabs">
+                <div class="tab active" onclick="switchTab('sensor')">Sensor</div>
+                <div class="tab" onclick="switchTab('aktuator')">Aktuator</div>
+            </div>
+        </div>
+
+        <!-- Device Lists -->
+        <div class="device-list" id="deviceList"></div>
+        <div class="device-list" id="aktuatorList" style="display: none;"></div>
+    </div>
+
+    
+    <script src="JS/script.js"></script>
+</body>
+</html>

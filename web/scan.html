@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Device Scan</title>
+    <link rel="stylesheet" href="CSS/style.css" />
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-menu">
+            <a href="home.html" class="nav-item">Home</a>
+            <a href="scan.html" class="nav-item active">Scan Device</a>
+            <a href="logdata.html" class="nav-item">Log Data</a>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container">
+        <div class="header">
+            <h1 class="page-title">Device Search</h1>
+            <button class="scan-btn" id="scanBtn" onclick="toggleScan()">
+                <span class="scan-icon">🔍</span>
+                <span class="scan-text">Scanning</span>
+            </button>
+        </div>
+
+        <div class="device-list" id="deviceList">
+            <!-- Empty state initially -->
+            <div class="empty-state" id="emptyState">
+                <div class="icon">📡</div>
+                <div class="message">No devices found</div>
+                <div class="submessage">Click "Scanning" to search for available devices</div>
+            </div>
+        </div>
+
+        <div class="footer" id="deviceCount">
+            Perangkat Terdeteksi: 0
+        </div>
+    </div>
+
+    
+
+    <script src="JS/script.js"></script>
+</body>
+</html>

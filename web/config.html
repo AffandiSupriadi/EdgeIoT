@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Konfigurasi Perangkat</title>
+    <link rel="stylesheet" href="CSS/style.css" />
+</head>
+<body>
+        <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-menu">
+            <a href="home.Html" class="nav-item active">Home</a>
+            <a href="scan.html" class="nav-item">Scan Device</a>
+            <a href="logdata.html" class="nav-item">Log Data</a>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container">
+        <div class="config-card">
+            <h1 class="config-title">Device Configuration</h1>
+            
+            <form id="configForm">
+                <!-- Name Field -->
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <span class="form-colon">:</span>
+                    <input type="text" class="form-input" id="deviceName" name="deviceName" placeholder="Enter device name">
+                </div>
+
+                <!-- Read Interval Field -->
+                <div class="form-group">
+                    <label class="form-label">Read Interval</label>
+                    <span class="form-colon">:</span>
+                    <input type="number" class="form-input" id="readInterval" name="readInterval" placeholder="Enter read interval (seconds)" min="1">
+                </div>
+
+                <!-- IP Address Field -->
+                <div class="form-group">
+                    <label class="form-label">IP address</label>
+                    <span class="form-colon">:</span>
+                    <input type="text" class="form-input" id="ipAddress" name="ipAddress" placeholder="192.xxx.xxx.xxx" pattern="^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$">
+                </div>
+
+                <!-- Device Type Field -->
+                <div class="form-group">
+                    <label class="form-label">Device Type</label>
+                    <span class="form-colon">:</span>
+                    <div class="radio-group">
+                        <div class="radio-item">
+                            <div class="radio-input">
+                                <input type="radio" id="sensor" name="deviceType" value="sensor">
+                                <span class="radio-dot"></span>
+                            </div>
+                            <label for="sensor" class="radio-label">Sensor</label>
+                        </div>
+                        <div class="radio-item">
+                            <div class="radio-input">
+                                <input type="radio" id="actuator" name="deviceType" value="actuator" checked>
+                                <span class="radio-dot"></span>
+                            </div>
+                            <label for="actuator" class="radio-label">Actuator</label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Submit Button -->
+                <div class="btn-container">
+                    <button type="submit" class="change-btn">Change</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    
+    <script src="JS/script.js"></script>
+</body>
+</html>
