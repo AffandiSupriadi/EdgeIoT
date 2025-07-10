@@ -1,8 +1,17 @@
+/*
+ * Complete SDN Control Plane Program - FIXED VERSION
+ * Integrates all enhancements: discovery, configuration, data management
+ * Author: SDN IoT Project
+ * Version: 2.1
+ */
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SPI.h>
 #include <SD.h>
-#include <ArduinoJson.h>  
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <vector>
 
 // SD Card Pins
 #define SD_CS 5
@@ -10,14 +19,31 @@
 #define SD_MISO 19
 #define SD_SCK 18
 
-// Login credentials (dummy)
+// Login credentials
 const char* username = "admin";
 const char* password = "admin";
 
 // Web Server & WiFi
 WebServer server(80);
+HTTPClient httpClient;
 
-// ---------------- WIFI AP MODE ------------------
+// Device discovery structure
+struct DiscoveredDevice {
+  String ssid;
+  String deviceId;
+  String deviceType;
+  String description;
+  String firmwareVersion;
+  String hardwareVersion;
+  bool configured;
+  int rssi;
+  JsonObject capability;
+};
+
+// Global variables
+std::vector<DiscoveredDevice> discoveredDevices;
+
+// ==================== WIFI AP MODE ====================
 void setupWiFiAP() {
   WiFi.softAP("ESP32-IoT-Server", "12345678");
   Serial.println("Access Point Started");
@@ -25,7 +51,7 @@ void setupWiFiAP() {
   Serial.println(WiFi.softAPIP());
 }
 
-// ---------------- SD CARD INIT ------------------
+// ==================== SD CARD INIT ====================
 void initSDCard() {
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   if (!SD.begin(SD_CS)) {
@@ -35,7 +61,116 @@ void initSDCard() {
   Serial.println("SD Card Initialized.");
 }
 
-// ---------------- FILE SERVING ------------------
+// ==================== OFFLINE STORAGE ====================
+bool createDirectoryIfNotExists(const char* path) {
+  if (!SD.exists(path)) {
+    return SD.mkdir(path);
+  }
+  return true;
+}
+
+void initOfflineStorage() {
+  createDirectoryIfNotExists("/data");
+  createDirectoryIfNotExists("/data/sensors");
+  createDirectoryIfNotExists("/data/commands");
+  createDirectoryIfNotExists("/data/cloud");
+  createDirectoryIfNotExists("/config");
+  
+  // Initialize cloud queue if not exists
+  if (!SD.exists("/data/cloud/queue.json")) {
+    File file = SD.open("/data/cloud/queue.json", FILE_WRITE);
+    if (file) {
+      file.print("{\"queue\":[]}");
+      file.close();
+    }
+  }
+  
+  // Initialize devices config if not exists
+  if (!SD.exists("/config/devices.json")) {
+    File file = SD.open("/config/devices.json", FILE_WRITE);
+    if (file) {
+      file.print("{\"devices\":[]}");
+      file.close();
+    }
+  }
+}
+
+String getTodayDateString() {
+  // Simple date implementation - in production use RTC
+  static int dayCounter = 1;
+  return "2024-01-" + String(dayCounter < 10 ? "0" : "") + String(dayCounter);
+}
+
+bool saveSensorData(String deviceId, String deviceName, String sensorType, 
+                   float value, String unit, String timestamp) {
+  String dateStr = getTodayDateString();
+  String filename = "/data/sensors/" + dateStr + ".json";
+  
+  StaticJsonDocument<1024> dayData;
+  
+  // Load existing data if file exists
+  if (SD.exists(filename)) {
+    File file = SD.open(filename, FILE_READ);
+    if (file) {
+      DeserializationError error = deserializeJson(dayData, file);
+      file.close();
+      if (error) {
+        dayData["date"] = dateStr;
+        dayData["data"] = JsonArray();
+      }
+    }
+  } else {
+    dayData["date"] = dateStr;
+    dayData["data"] = JsonArray();
+  }
+  
+  // Add new data point
+  JsonArray dataArray = dayData["data"].as<JsonArray>();
+  JsonObject newData = dataArray.createNestedObject();
+  newData["timestamp"] = timestamp;
+  newData["deviceId"] = deviceId;
+  newData["deviceName"] = deviceName;
+  newData["type"] = sensorType;
+  newData["value"] = value;
+  newData["unit"] = unit;
+  newData["status"] = "ok";
+  
+  // Save back to file
+  File file = SD.open(filename, FILE_WRITE);
+  if (file) {
+    serializeJson(dayData, file);
+    file.close();
+    return true;
+  }
+  return false;
+}
+
+void addToCloudQueue(JsonObject sensorData) {
+  File file = SD.open("/data/cloud/queue.json", FILE_READ);
+  StaticJsonDocument<2048> queueData;
+  
+  if (file) {
+    DeserializationError error = deserializeJson(queueData, file);
+    file.close();
+    if (error) {
+      queueData["queue"] = JsonArray();
+    }
+  } else {
+    queueData["queue"] = JsonArray();
+  }
+  
+  JsonArray queue = queueData["queue"].as<JsonArray>();
+  queue.add(sensorData);
+  
+  // Save back
+  File saveFile = SD.open("/data/cloud/queue.json", FILE_WRITE);
+  if (saveFile) {
+    serializeJson(queueData, saveFile);
+    saveFile.close();
+  }
+}
+
+// ==================== FILE SERVING ====================
 String getContentType(String filename) {
   if (filename.endsWith(".html")) return "text/html";
   if (filename.endsWith(".css")) return "text/css";
@@ -44,7 +179,7 @@ String getContentType(String filename) {
 }
 
 bool handleFileRead(String path) {
-  if (path.endsWith("/")) path += "login.html";  // default page
+  if (path.endsWith("/")) path += "login.html";
   String contentType = getContentType(path);
   String fullPath = "/web" + path;
   if (SD.exists(fullPath)) {
@@ -56,7 +191,7 @@ bool handleFileRead(String path) {
   return false;
 }
 
-// ---------------- API HANDLERS ------------------
+// ==================== AUTHENTICATION ====================
 void handleLogin() {
   if (server.method() == HTTP_POST) {
     String user = server.arg("username");
@@ -71,65 +206,122 @@ void handleLogin() {
   }
 }
 
-void handleDeviceConfig() {
+void handleLogout() {
   if (server.method() == HTTP_POST) {
-    String body = server.arg("plain");
-
-    // Parse data device baru
-    StaticJsonDocument<256> newDevice;
-    DeserializationError error = deserializeJson(newDevice, body);
-    if (error) {
-      server.send(400, "application/json", "{\"success\":false, \"message\":\"Invalid JSON\"}");
-      return;
-    }
-
-    // Buka file yang ada
-    File file = SD.open("/config/devices.json", FILE_READ);
-    StaticJsonDocument<1024> data;
-
-    if (file) {
-      DeserializationError err = deserializeJson(data, file);
-      file.close();
-      if (err) {
-        data["devices"] = JsonArray(); // error → buat baru
-      }
-    } else {
-      data["devices"] = JsonArray(); // file tidak ada → buat baru
-    }
-
-    // Tambahkan device baru ke array
-    JsonArray devices = data["devices"].as<JsonArray>();
-    devices.add(newDevice);
-
-    // Simpan ulang
-    File saveFile = SD.open("/config/devices.json", FILE_WRITE);
-    if (!saveFile) {
-      server.send(500, "application/json", "{\"success\":false, \"message\":\"Save failed\"}");
-      return;
-    }
-
-    serializeJson(data, saveFile);
-    saveFile.close();
-
-    server.send(200, "application/json", "{\"success\":true}");
-  }
-
-  else if (server.method() == HTTP_GET) {
-    File file = SD.open("/config/devices.json", FILE_READ);
-    if (file) {
-      server.streamFile(file, "application/json");
-      file.close();
-    } else {
-      server.send(200, "application/json", "{\"devices\":[]}");
-    }
-  }
-
-  else {
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Logged out\"}");
+  } else {
     server.send(405, "text/plain", "Method Not Allowed");
   }
 }
 
+// ==================== DEVICE DISCOVERY ====================
+bool getDeviceInfo(String ssid, DiscoveredDevice& device) {
+  Serial.println("Connecting to " + ssid + " to get device info...");
+  
+  // Connect to device AP
+  WiFi.begin(ssid.c_str(), "12345678");
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+    delay(500);
+    attempts++;
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Failed to connect to " + ssid);
+    WiFi.softAP("ESP32-IoT-Server", "12345678");
+    return false;
+  }
+  
+  // Get device info via HTTP
+  HTTPClient http;
+  String url = "http://192.168.4.1/api/info";
+  
+  http.begin(url);
+  http.setTimeout(5000);
+  
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    String payload = http.getString();
+    
+    StaticJsonDocument<1024> deviceInfo;
+    DeserializationError error = deserializeJson(deviceInfo, payload);
+    
+    if (!error) {
+      device.ssid = ssid;
+      // Fixed: Explicitly convert JsonVariant to String
+      device.deviceId = deviceInfo["deviceId"].as<String>();
+      device.deviceType = deviceInfo["deviceType"].as<String>();
+      device.description = deviceInfo["description"].as<String>();
+      device.firmwareVersion = deviceInfo["firmwareVersion"].as<String>();
+      device.hardwareVersion = deviceInfo["hardwareVersion"].as<String>();
+      device.configured = deviceInfo["configured"];
+      device.rssi = WiFi.RSSI();
+      
+      Serial.println("Device info retrieved successfully");
+      http.end();
+      
+      WiFi.disconnect();
+      WiFi.softAP("ESP32-IoT-Server", "12345678");
+      
+      return true;
+    }
+  }
+  
+  http.end();
+  WiFi.disconnect();
+  WiFi.softAP("ESP32-IoT-Server", "12345678");
+  
+  return false;
+}
 
+void handleAdvancedWiFiScan() {
+  Serial.println("Starting advanced WiFi scan for SDN devices...");
+  
+  discoveredDevices.clear();
+  
+  int networkCount = WiFi.scanNetworks();
+  
+  if (networkCount == 0) {
+    server.send(200, "application/json", "{\"devices\":[]}");
+    return;
+  }
+  
+  StaticJsonDocument<2048> response;
+  JsonArray devices = response.createNestedArray("devices");
+  
+  for (int i = 0; i < networkCount; i++) {
+    String ssid = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+    
+    if (ssid.startsWith("ESP32_Device_")) {
+      Serial.println("Found potential SDN device: " + ssid);
+      
+      DiscoveredDevice device;
+      if (getDeviceInfo(ssid, device)) {
+        discoveredDevices.push_back(device);
+        
+        JsonObject deviceJson = devices.createNestedObject();
+        deviceJson["ssid"] = device.ssid;
+        deviceJson["deviceId"] = device.deviceId;
+        deviceJson["deviceType"] = device.deviceType;
+        deviceJson["description"] = device.description;
+        deviceJson["configured"] = device.configured;
+        deviceJson["rssi"] = device.rssi;
+        deviceJson["firmwareVersion"] = device.firmwareVersion;
+      }
+    }
+  }
+  
+  String jsonResponse;
+  serializeJson(response, jsonResponse);
+  server.send(200, "application/json", jsonResponse);
+  
+  WiFi.scanDelete();
+}
+
+// ==================== LEGACY WIFI SCAN ====================
 void handleWiFiScan() {
   int n = WiFi.scanNetworks();
   if (n == 0) {
@@ -141,17 +333,473 @@ void handleWiFiScan() {
   for (int i = 0; i < n; i++) {
     json += "{";
     json += "\"name\":\"" + WiFi.SSID(i) + "\",";
-    json += "\"ip\":\"192.168.4.1\""; // Bisa diganti jika kamu ingin simulasikan IP tiap node
+    json += "\"ip\":\"192.168.4.1\"";
     json += "}";
     if (i < n - 1) json += ",";
   }
   json += "]}";
 
-  // Clear scan results
   WiFi.scanDelete();
   server.send(200, "application/json", json);
 }
 
+// ==================== DEVICE CONFIGURATION ====================
+bool configureDevice(DiscoveredDevice& device, String deviceName, String deviceType, int readInterval) {
+  Serial.println("Configuring device: " + device.deviceId);
+  
+  WiFi.begin(device.ssid.c_str(), "12345678");
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+    delay(500);
+    attempts++;
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Failed to connect to device for configuration");
+    WiFi.softAP("ESP32-IoT-Server", "12345678");
+    return false;
+  }
+  
+  HTTPClient http;
+  String url = "http://192.168.4.1/api/config";
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  
+  StaticJsonDocument<512> configPayload;
+  configPayload["deviceName"] = deviceName;
+  configPayload["deviceType"] = deviceType;
+  configPayload["wifiSSID"] = "ESP32-IoT-Server";
+  configPayload["wifiPassword"] = "12345678";
+  configPayload["controlPlaneIP"] = WiFi.softAPIP().toString();
+  configPayload["controlPlanePort"] = 80;
+  configPayload["readInterval"] = readInterval;
+  
+  String payload;
+  serializeJson(configPayload, payload);
+  
+  int httpCode = http.POST(payload);
+  
+  bool success = (httpCode == 200);
+  
+  if (success) {
+    Serial.println("Device configured successfully");
+  } else {
+    Serial.println("Device configuration failed: " + String(httpCode));
+  }
+  
+  http.end();
+  WiFi.disconnect();
+  WiFi.softAP("ESP32-IoT-Server", "12345678");
+  
+  return success;
+}
+
+void saveConfiguredDevice(DiscoveredDevice& device, String deviceName, String deviceType, int readInterval) {
+  File file = SD.open("/config/devices.json", FILE_READ);
+  StaticJsonDocument<2048> data;
+  
+  if (file) {
+    DeserializationError error = deserializeJson(data, file);
+    file.close();
+    if (error) {
+      data["devices"] = JsonArray();
+    }
+  } else {
+    data["devices"] = JsonArray();
+  }
+  
+  JsonArray devices = data["devices"].as<JsonArray>();
+  JsonObject newDevice = devices.createNestedObject();
+  
+  newDevice["id"] = device.deviceId;
+  newDevice["name"] = deviceName;
+  newDevice["type"] = deviceType;
+  newDevice["ip"] = "pending";
+  newDevice["readInterval"] = readInterval;
+  newDevice["connected"] = false;
+  newDevice["configured"] = true;
+  newDevice["lastSeen"] = "";
+  newDevice["firmwareVersion"] = device.firmwareVersion;
+  newDevice["hardwareVersion"] = device.hardwareVersion;
+  
+  File saveFile = SD.open("/config/devices.json", FILE_WRITE);
+  if (saveFile) {
+    serializeJson(data, saveFile);
+    saveFile.close();
+    Serial.println("Device saved to database");
+  }
+}
+
+void handleDeviceConfiguration() {
+  if (server.method() == HTTP_POST) {
+    String body = server.arg("plain");
+    
+    StaticJsonDocument<512> configData;
+    DeserializationError error = deserializeJson(configData, body);
+    
+    if (error) {
+      server.send(400, "application/json", "{\"success\":false,\"message\":\"Invalid JSON\"}");
+      return;
+    }
+    
+    String targetDeviceId = configData["deviceId"];
+    String deviceName = configData["deviceName"];
+    String deviceType = configData["deviceType"];
+    int readInterval = configData["readInterval"];
+    
+    DiscoveredDevice* targetDevice = nullptr;
+    for (auto& device : discoveredDevices) {
+      if (device.deviceId == targetDeviceId) {
+        targetDevice = &device;
+        break;
+      }
+    }
+    
+    if (!targetDevice) {
+      server.send(404, "application/json", "{\"success\":false,\"message\":\"Device not found\"}");
+      return;
+    }
+    
+    if (configureDevice(*targetDevice, deviceName, deviceType, readInterval)) {
+      saveConfiguredDevice(*targetDevice, deviceName, deviceType, readInterval);
+      server.send(200, "application/json", "{\"success\":true,\"message\":\"Device configured successfully\"}");
+    } else {
+      server.send(500, "application/json", "{\"success\":false,\"message\":\"Configuration failed\"}");
+    }
+  } else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+// ==================== DEVICE MANAGEMENT ====================
+void handleDeviceConfig() {
+  if (server.method() == HTTP_POST) {
+    String body = server.arg("plain");
+
+    StaticJsonDocument<256> newDevice;
+    DeserializationError error = deserializeJson(newDevice, body);
+    if (error) {
+      server.send(400, "application/json", "{\"success\":false, \"message\":\"Invalid JSON\"}");
+      return;
+    }
+
+    File file = SD.open("/config/devices.json", FILE_READ);
+    StaticJsonDocument<1024> data;
+
+    if (file) {
+      DeserializationError err = deserializeJson(data, file);
+      file.close();
+      if (err) {
+        data["devices"] = JsonArray();
+      }
+    } else {
+      data["devices"] = JsonArray();
+    }
+
+    JsonArray devices = data["devices"].as<JsonArray>();
+    devices.add(newDevice);
+
+    File saveFile = SD.open("/config/devices.json", FILE_WRITE);
+    if (!saveFile) {
+      server.send(500, "application/json", "{\"success\":false, \"message\":\"Save failed\"}");
+      return;
+    }
+
+    serializeJson(data, saveFile);
+    saveFile.close();
+
+    server.send(200, "application/json", "{\"success\":true}");
+  }
+  else if (server.method() == HTTP_GET) {
+    File file = SD.open("/config/devices.json", FILE_READ);
+    if (file) {
+      server.streamFile(file, "application/json");
+      file.close();
+    } else {
+      server.send(200, "application/json", "{\"devices\":[]}");
+    }
+  }
+  else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+bool updateDeviceIP(String deviceId, String newIP) {
+  File file = SD.open("/config/devices.json", FILE_READ);
+  StaticJsonDocument<2048> data;
+  
+  if (file) {
+    DeserializationError error = deserializeJson(data, file);
+    file.close();
+    if (error) return false;
+  } else {
+    return false;
+  }
+  
+  JsonArray devices = data["devices"].as<JsonArray>();
+  bool found = false;
+  
+  for (JsonObject device : devices) {
+    if (device["id"] == deviceId) {
+      device["ip"] = newIP;
+      device["connected"] = true;
+      device["lastSeen"] = String(millis());
+      found = true;
+      break;
+    }
+  }
+  
+  if (!found) return false;
+  
+  File saveFile = SD.open("/config/devices.json", FILE_WRITE);
+  if (saveFile) {
+    serializeJson(data, saveFile);
+    saveFile.close();
+    return true;
+  }
+  
+  return false;
+}
+
+void handleDeviceRegistration() {
+  if (server.method() == HTTP_POST) {
+    String body = server.arg("plain");
+    
+    StaticJsonDocument<512> regData;
+    DeserializationError error = deserializeJson(regData, body);
+    
+    if (error) {
+      server.send(400, "application/json", "{\"success\":false,\"message\":\"Invalid JSON\"}");
+      return;
+    }
+    
+    String deviceId = regData["deviceId"];
+    String deviceIP = regData["ip"];
+    
+    if (updateDeviceIP(deviceId, deviceIP)) {
+      server.send(200, "application/json", "{\"success\":true}");
+    } else {
+      server.send(404, "application/json", "{\"success\":false,\"message\":\"Device not found\"}");
+    }
+  } else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+void handleDeviceStatus() {
+  if (server.method() == HTTP_POST) {
+    String deviceId = server.arg("deviceId");
+    String status = server.arg("status");
+    String lastSeen = server.arg("lastSeen");
+    
+    if (deviceId.isEmpty() || status.isEmpty()) {
+      server.send(400, "application/json", "{\"success\":false,\"message\":\"Missing parameters\"}");
+      return;
+    }
+    
+    File file = SD.open("/config/devices.json", FILE_READ);
+    StaticJsonDocument<2048> data;
+    
+    if (file) {
+      DeserializationError error = deserializeJson(data, file);
+      file.close();
+      if (error) {
+        data["devices"] = JsonArray();
+      }
+    } else {
+      data["devices"] = JsonArray();
+    }
+    
+    JsonArray devices = data["devices"].as<JsonArray>();
+    bool found = false;
+    
+    for (JsonObject device : devices) {
+      if (device["id"] == deviceId) {
+        device["connected"] = (status == "connected");
+        if (!lastSeen.isEmpty()) {
+          device["lastSeen"] = lastSeen;
+        }
+        found = true;
+        break;
+      }
+    }
+    
+    if (!found) {
+      server.send(404, "application/json", "{\"success\":false,\"message\":\"Device not found\"}");
+      return;
+    }
+    
+    File saveFile = SD.open("/config/devices.json", FILE_WRITE);
+    if (saveFile) {
+      serializeJson(data, saveFile);
+      saveFile.close();
+      server.send(200, "application/json", "{\"success\":true}");
+    } else {
+      server.send(500, "application/json", "{\"success\":false,\"message\":\"Save failed\"}");
+    }
+  } else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+// ==================== DATA MANAGEMENT ====================
+void handleSensorData() {
+  if (server.method() == HTTP_POST) {
+    String body = server.arg("plain");
+    
+    StaticJsonDocument<512> sensorData;
+    DeserializationError error = deserializeJson(sensorData, body);
+    
+    if (error) {
+      server.send(400, "application/json", "{\"success\":false,\"message\":\"Invalid JSON\"}");
+      return;
+    }
+    
+    String deviceId = sensorData["deviceId"];
+    String deviceName = sensorData["deviceName"];
+    String sensorType = sensorData["type"];
+    float value = sensorData["value"];
+    String unit = sensorData["unit"];
+    String timestamp = sensorData["timestamp"];
+    
+    if (saveSensorData(deviceId, deviceName, sensorType, value, unit, timestamp)) {
+      // Fixed: Convert to JsonObject before passing
+      JsonObject sensorObj = sensorData.as<JsonObject>();
+      addToCloudQueue(sensorObj);
+      server.send(200, "application/json", "{\"success\":true}");
+    } else {
+      server.send(500, "application/json", "{\"success\":false,\"message\":\"Storage failed\"}");
+    }
+  } else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+void handleLogData() {
+  if (server.method() == HTTP_GET) {
+    String date = server.arg("date");
+    if (date.isEmpty()) {
+      date = getTodayDateString();
+    }
+    
+    String filename = "/data/sensors/" + date + ".json";
+    
+    if (SD.exists(filename)) {
+      File file = SD.open(filename, FILE_READ);
+      if (file) {
+        server.streamFile(file, "application/json");
+        file.close();
+      } else {
+        server.send(500, "application/json", "{\"success\":false,\"message\":\"File read error\"}");
+      }
+    } else {
+      server.send(200, "application/json", "{\"date\":\"" + date + "\",\"data\":[]}");
+    }
+  } else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+void handleHeartbeat() {
+  if (server.method() == HTTP_POST) {
+    String deviceId = server.arg("deviceId");
+    String timestamp = server.arg("timestamp");
+    
+    if (deviceId.isEmpty()) {
+      server.send(400, "application/json", "{\"success\":false,\"message\":\"Missing deviceId\"}");
+      return;
+    }
+    
+    server.send(200, "application/json", "{\"success\":true,\"serverTime\":\"" + String(millis()) + "\"}");
+  } else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+// ==================== COMMAND MANAGEMENT ====================
+void handleDeviceCommands() {
+  if (server.method() == HTTP_GET) {
+    String deviceId = server.arg("deviceId");
+    
+    if (deviceId.isEmpty()) {
+      server.send(400, "application/json", "{\"success\":false,\"message\":\"Missing deviceId\"}");
+      return;
+    }
+    
+    File file = SD.open("/data/commands/pending.json", FILE_READ);
+    StaticJsonDocument<1024> commandData;
+    
+    if (file) {
+      DeserializationError error = deserializeJson(commandData, file);
+      file.close();
+      if (error) {
+        commandData["commands"] = JsonArray();
+      }
+    } else {
+      commandData["commands"] = JsonArray();
+    }
+    
+    JsonArray commands = commandData["commands"].as<JsonArray>();
+    StaticJsonDocument<512> response;
+    JsonArray deviceCommands = response.createNestedArray("commands");
+    
+    for (JsonObject cmd : commands) {
+      if (cmd["deviceId"] == deviceId) {
+        deviceCommands.add(cmd);
+      }
+    }
+    
+    String responseStr;
+    serializeJson(response, responseStr);
+    server.send(200, "application/json", responseStr);
+    
+  } else if (server.method() == HTTP_POST) {
+    String body = server.arg("plain");
+    
+    StaticJsonDocument<256> newCommand;
+    DeserializationError error = deserializeJson(newCommand, body);
+    
+    if (error) {
+      server.send(400, "application/json", "{\"success\":false,\"message\":\"Invalid JSON\"}");
+      return;
+    }
+    
+    newCommand["id"] = String(millis());
+    newCommand["timestamp"] = String(millis());
+    newCommand["status"] = "pending";
+    
+    File file = SD.open("/data/commands/pending.json", FILE_READ);
+    StaticJsonDocument<1024> commandData;
+    
+    if (file) {
+      DeserializationError err = deserializeJson(commandData, file);
+      file.close();
+      if (err) {
+        commandData["commands"] = JsonArray();
+      }
+    } else {
+      commandData["commands"] = JsonArray();
+    }
+    
+    JsonArray commands = commandData["commands"].as<JsonArray>();
+    commands.add(newCommand);
+    
+    File saveFile = SD.open("/data/commands/pending.json", FILE_WRITE);
+    if (saveFile) {
+      serializeJson(commandData, saveFile);
+      saveFile.close();
+      server.send(200, "application/json", "{\"success\":true}");
+    } else {
+      server.send(500, "application/json", "{\"success\":false,\"message\":\"Save failed\"}");
+    }
+  } else {
+    server.send(405, "text/plain", "Method Not Allowed");
+  }
+}
+
+// ==================== FIRMWARE UPDATE ====================
 void handleFirmwareUpdate() {
   File updateFile = SD.open("/firmware/firmware.bin", FILE_READ);
   if (!updateFile) {
@@ -172,18 +820,42 @@ void handleFirmwareVersion() {
   versionFile.close();
 }
 
-
-// ---------------- SETUP & LOOP ------------------
+// ==================== SETUP & LOOP ====================
 void setup() {
   Serial.begin(115200);
+  Serial.println("=== SDN Control Plane Starting ===");
+  
   setupWiFiAP();
   initSDCard();
+  initOfflineStorage();
 
+  // Authentication endpoints
+  server.on("/login", handleLogin);
+  server.on("/logout", handleLogout);
+  
+  // Device discovery and configuration
+  server.on("/api/scan", HTTP_POST, handleWiFiScan);
+  server.on("/api/scan/advanced", HTTP_POST, handleAdvancedWiFiScan);
+  server.on("/api/configure", HTTP_POST, handleDeviceConfiguration);
+  server.on("/api/register", HTTP_POST, handleDeviceRegistration);
+  
+  // Device management
+  server.on("/api/devices", handleDeviceConfig);
+  server.on("/api/devices/status", handleDeviceStatus);
+  
+  // Data management
+  server.on("/api/data", handleSensorData);
+  server.on("/api/logdata", handleLogData);
+  server.on("/api/heartbeat", handleHeartbeat);
+  
+  // Command management
+  server.on("/api/commands", handleDeviceCommands);
+  
+  // Firmware management
   server.on("/firmware/version.txt", HTTP_GET, handleFirmwareVersion);
   server.on("/firmware/firmware.bin", HTTP_GET, handleFirmwareUpdate);
-  server.on("/login", handleLogin);
-  server.on("/api/devices", handleDeviceConfig);
-  server.on("/api/scan", HTTP_POST, handleWiFiScan);
+  
+  // File serving
   server.onNotFound([]() {
     if (!handleFileRead(server.uri())) {
       server.send(404, "text/plain", "File Not Found");
@@ -191,9 +863,15 @@ void setup() {
   });
 
   server.begin();
-  Serial.println("Web server started.");
+  Serial.println("=== SDN Control Plane Ready ===");
+  Serial.println("Web server started with complete SDN features");
+  Serial.println("Access Point: ESP32-IoT-Server");
+  Serial.println("IP Address: " + WiFi.softAPIP().toString());
 }
 
 void loop() {
   server.handleClient();
+  
+  // Add any periodic tasks here
+  delay(10);
 }
