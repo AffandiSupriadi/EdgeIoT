@@ -1,8 +1,8 @@
 /**
  * ESP32 IoT System - Unified JavaScript
- * Handles communication with ESP32 Control Plane Server
+ * Updated to match Control Plane and Data Plane implementations
  * Author: IoT Development Team
- * Version: 1.0
+ * Version: 2.0
  */
 
 class ESP32IoTSystem {
@@ -10,6 +10,7 @@ class ESP32IoTSystem {
         this.baseURL = '';  // Empty for same-origin requests
         this.token = localStorage.getItem('esp32_token') || '';
         this.devices = [];
+        this.discoveredDevices = [];
         this.isScanning = false;
         this.scanInterval = null;
         this.logData = [];
@@ -22,15 +23,6 @@ class ESP32IoTSystem {
         this.setupEventListeners();
         this.checkAuthentication();
         this.startAutoRefresh();
-        // Auto-isi IP jika dari scan
-        const ipInput = document.getElementById('ipAddress');
-        if (ipInput) {
-            const ip = localStorage.getItem('pendingDeviceIP');
-            if (ip) {
-                ipInput.value = ip;
-                localStorage.removeItem('pendingDeviceIP');
-            }
-        }
     }
 
     // ==================== AUTHENTICATION ====================
@@ -127,28 +119,67 @@ class ESP32IoTSystem {
 
     async saveDeviceConfig(config) {
         try {
-            const response = await fetch('/api/devices', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': this.token
-                },
-                body: JSON.stringify(config)
-            });
+            // First, configure the device if it's from a scan
+            if (config.deviceId && this.discoveredDevices.length > 0) {
+                // Find the discovered device
+                const discoveredDevice = this.discoveredDevices.find(d => d.deviceId === config.deviceId);
+                
+                if (discoveredDevice) {
+                    // Configure the device through the control plane
+                    const configResponse = await fetch('/api/configure', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': this.token
+                        },
+                        body: JSON.stringify({
+                            deviceId: config.deviceId,
+                            deviceName: config.deviceName,
+                            deviceType: config.deviceType,
+                            readInterval: config.readInterval
+                        })
+                    });
 
-            const data = await response.json();
+                    const configData = await configResponse.json();
+                    
+                    if (!configData.success) {
+                        this.showNotification(configData.message || 'Failed to configure device', 'error');
+                        return false;
+                    }
+                }
+            } else {
+                // Manual device addition
+                const response = await fetch('/api/devices', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': this.token
+                    },
+                    body: JSON.stringify({
+                        name: config.deviceName,
+                        type: config.deviceType,
+                        ip: config.ipAddress,
+                        readInterval: config.readInterval,
+                        connected: false,
+                        configured: true
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (!data.success) {
+                    this.showNotification(data.message || 'Failed to save configuration', 'error');
+                    return false;
+                }
+            }
             
-            if (data.success) {
-                this.showNotification('Device configuration saved!', 'success');
-                await this.loadDevices();
-                setTimeout(() => {
-                    window.location.href = '/home.html';
-                }, 1000);
-            }
-            else {
-                this.showNotification(data.message || 'Failed to save configuration', 'error');
-                return false;
-            }
+            this.showNotification('Device configuration saved!', 'success');
+            await this.loadDevices();
+            setTimeout(() => {
+                window.location.href = '/home.html';
+            }, 1000);
+            
+            return true;
         } catch (error) {
             console.error('Error saving device config:', error);
             this.showNotification('Connection error. Please try again.', 'error');
@@ -156,7 +187,7 @@ class ESP32IoTSystem {
         }
     }
 
-    async updateDeviceStatus(deviceIP, status) {
+    async updateDeviceStatus(deviceId, status) {
         try {
             const response = await fetch('/api/devices/status', {
                 method: 'POST',
@@ -164,7 +195,7 @@ class ESP32IoTSystem {
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Authorization': this.token
                 },
-                body: `ip=${encodeURIComponent(deviceIP)}&status=${encodeURIComponent(status)}`
+                body: `deviceId=${encodeURIComponent(deviceId)}&status=${encodeURIComponent(status)}&lastSeen=${Date.now()}`
             });
 
             if (response.ok) {
@@ -185,7 +216,8 @@ class ESP32IoTSystem {
         this.clearScanResults();
         
         try {
-            const response = await fetch('/api/scan', {
+            // Use advanced scan to get device details
+            const response = await fetch('/api/scan/advanced', {
                 method: 'POST',
                 headers: {
                     'Authorization': this.token
@@ -194,7 +226,8 @@ class ESP32IoTSystem {
 
             if (response.ok) {
                 const data = await response.json();
-                this.displayScanResults(data.devices || []);
+                this.discoveredDevices = data.devices || [];
+                this.displayScanResults(this.discoveredDevices);
             } else {
                 this.showNotification('Scan failed', 'error');
             }
@@ -207,20 +240,26 @@ class ESP32IoTSystem {
         }
     }
 
-    async connectToDevice(deviceIP) {
+    async connectToDevice(deviceId) {
         try {
-            await this.updateDeviceStatus(deviceIP, 'connected');
-            this.showNotification(`Connected to device ${deviceIP}`, 'success');
+            const device = this.discoveredDevices.find(d => d.deviceId === deviceId);
+            if (!device) {
+                this.showNotification('Device not found', 'error');
+                return;
+            }
 
+            this.showNotification(`Connecting to ${device.description}...`, 'info');
+
+            // Store device info for configuration page
+            localStorage.setItem('pendingDevice', JSON.stringify(device));
+            
             setTimeout(() => {
-                localStorage.setItem('pendingDeviceIP', deviceIP);
                 window.location.href = '/config.html';
             }, 1000);
         } catch (error) {
             this.showNotification('Connection failed', 'error');
         }
     }
-
 
     // ==================== LOG DATA ====================
     
@@ -234,7 +273,8 @@ class ESP32IoTSystem {
 
             if (response.ok) {
                 const data = await response.json();
-                this.logData = data.logs || [];
+                // Process sensor data with new structure
+                this.logData = this.processSensorData(data.data || []);
                 this.updateLogDataDisplay();
             } else {
                 console.error('Failed to load log data');
@@ -242,6 +282,36 @@ class ESP32IoTSystem {
         } catch (error) {
             console.error('Error loading log data:', error);
         }
+    }
+
+    processSensorData(rawData) {
+        const processedData = [];
+        
+        rawData.forEach(entry => {
+            // Handle new sensor data structure with readings array
+            if (entry.readings && Array.isArray(entry.readings)) {
+                entry.readings.forEach(reading => {
+                    processedData.push({
+                        timestamp: entry.timestamp,
+                        deviceName: entry.deviceName || 'Unknown Device',
+                        type: reading.type,
+                        value: `${reading.value} ${reading.unit}`,
+                        status: reading.status || 'ok'
+                    });
+                });
+            } else {
+                // Handle legacy single sensor data
+                processedData.push({
+                    timestamp: entry.timestamp,
+                    deviceName: entry.deviceName || 'Unknown Device',
+                    type: entry.type || 'sensor',
+                    value: `${entry.value} ${entry.unit || ''}`,
+                    status: entry.status || 'ok'
+                });
+            }
+        });
+        
+        return processedData;
     }
 
     // ==================== UI UPDATE METHODS ====================
@@ -294,7 +364,7 @@ class ESP32IoTSystem {
                 <div class="device-status">
                     <span class="status-text ${statusClass}">${statusText}</span>
                     <a class="setting" href="config.html"><span class="settings-icon">⚙️</span></a>
-                    <button class="action-btn ${buttonClass}" onclick="iotSystem.toggleConnection(this, '${device.ip}')">${buttonText}</button>
+                    <button class="action-btn ${buttonClass}" onclick="iotSystem.toggleConnection(this, '${device.id || device.ip}')">${buttonText}</button>
                 </div>
             </div>
         `;
@@ -305,8 +375,8 @@ class ESP32IoTSystem {
                     <div class="action-row">
                         <span class="action-label">Action:</span>
                         <div class="toggle-buttons">
-                            <button class="toggle-btn toggle-on" onclick="iotSystem.toggleAction(this, 'on', '${device.ip}')">ON</button>
-                            <button class="toggle-btn toggle-off" onclick="iotSystem.toggleAction(this, 'off', '${device.ip}')">OFF</button>
+                            <button class="toggle-btn toggle-on" onclick="iotSystem.sendCommand('${device.id || device.ip}', 'on')">ON</button>
+                            <button class="toggle-btn toggle-off" onclick="iotSystem.sendCommand('${device.id || device.ip}', 'off')">OFF</button>
                         </div>
                     </div>
                 </div>
@@ -315,13 +385,6 @@ class ESP32IoTSystem {
         
         deviceDiv.innerHTML = deviceHTML;
         return deviceDiv;
-    }
-
-    updateDeviceCount() {
-        const footerElement = document.querySelector('.footer');
-        if (footerElement) {
-            footerElement.textContent = `Jumlah Perangkat: ${this.devices.length}`;
-        }
     }
 
     updateScanButton(isScanning) {
@@ -371,9 +434,16 @@ class ESP32IoTSystem {
             const deviceItem = document.createElement('div');
             deviceItem.className = 'device-item';
             deviceItem.innerHTML = `
-                <div class="device-name">${device.name}</div>
-                <button class="connect-btn-scan" onclick="iotSystem.connectToDevice('${device.ip}')">
-                    Connect
+                <div class="device-info">
+                    <div class="device-name">${device.description || device.ssid}</div>
+                    <div class="device-details-scan">
+                        <span class="device-type">${device.deviceType || 'Unknown'}</span>
+                        <span class="device-rssi">Signal: ${device.rssi || 'N/A'} dBm</span>
+                        ${device.configured ? '<span class="configured-badge">Configured</span>' : ''}
+                    </div>
+                </div>
+                <button class="connect-btn-scan" onclick="iotSystem.connectToDevice('${device.deviceId}')">
+                    Configure
                 </button>
             `;
             deviceList.appendChild(deviceItem);
@@ -393,7 +463,7 @@ class ESP32IoTSystem {
         if (this.logData.length === 0) {
             tableBody.innerHTML = `
                 <tr class="empty-row">
-                    <td colspan="4">
+                    <td colspan="5">
                         <div class="empty-message">No data available. Connect a device to start logging data.</div>
                     </td>
                 </tr>
@@ -405,10 +475,46 @@ class ESP32IoTSystem {
             <tr>
                 <td>${new Date(parseInt(item.timestamp)).toLocaleString()}</td>
                 <td>${item.deviceName}</td>
-                <td>${item.data}</td>
-                <td>${item.dataSize}</td>
+                <td>${item.type}</td>
+                <td>${item.value}</td>
+                <td><span class="status-badge status-${item.status}">${item.status}</span></td>
             </tr>
         `).join('');
+    }
+
+    updateDeviceCount() {
+        const footerElement = document.querySelector('.footer');
+        if (footerElement) {
+            footerElement.textContent = `Jumlah Perangkat: ${this.devices.length}`;
+        }
+    }
+
+    // ==================== DEVICE COMMANDS ====================
+
+    async sendCommand(deviceId, command) {
+        try {
+            const response = await fetch('/api/commands', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': this.token
+                },
+                body: JSON.stringify({
+                    deviceId: deviceId,
+                    command: command,
+                    parameters: {}
+                })
+            });
+
+            if (response.ok) {
+                this.showNotification(`Command ${command.toUpperCase()} sent successfully`, 'success');
+            } else {
+                this.showNotification('Failed to send command', 'error');
+            }
+        } catch (error) {
+            console.error('Error sending command:', error);
+            this.showNotification('Error sending command', 'error');
+        }
     }
 
     // ==================== EVENT HANDLERS ====================
@@ -431,11 +537,24 @@ class ESP32IoTSystem {
             configForm.addEventListener('submit', async (e) => {
                 e.preventDefault();
                 
+                // Check if we have a pending device from scan
+                const pendingDeviceStr = localStorage.getItem('pendingDevice');
+                let pendingDevice = null;
+                
+                if (pendingDeviceStr) {
+                    try {
+                        pendingDevice = JSON.parse(pendingDeviceStr);
+                    } catch (e) {
+                        console.error('Error parsing pending device:', e);
+                    }
+                }
+                
                 const config = {
                     deviceName: document.getElementById('deviceName').value,
                     readInterval: parseInt(document.getElementById('readInterval').value),
                     ipAddress: document.getElementById('ipAddress').value,
-                    deviceType: document.querySelector('input[name="deviceType"]:checked').value
+                    deviceType: document.querySelector('input[name="deviceType"]:checked').value,
+                    deviceId: pendingDevice ? pendingDevice.deviceId : null
                 };
                 
                 // Validation
@@ -449,25 +568,60 @@ class ESP32IoTSystem {
                     return;
                 }
                 
-                if (!config.ipAddress.trim()) {
+                if (!pendingDevice && !config.ipAddress.trim()) {
                     this.showNotification('Please enter an IP address', 'error');
                     return;
                 }
                 
-                // IP validation
-                const ipPattern = /^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-                if (!ipPattern.test(config.ipAddress)) {
-                    this.showNotification('Please enter a valid IP address format', 'error');
-                    return;
+                // IP validation only if manually entering
+                if (!pendingDevice && config.ipAddress) {
+                    const ipPattern = /^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+                    if (!ipPattern.test(config.ipAddress)) {
+                        this.showNotification('Please enter a valid IP address format', 'error');
+                        return;
+                    }
                 }
                 
                 await this.saveDeviceConfig(config);
+                
+                // Clear pending device
+                localStorage.removeItem('pendingDevice');
             });
+            
+            // Pre-fill form if coming from scan
+            const pendingDeviceStr = localStorage.getItem('pendingDevice');
+            if (pendingDeviceStr) {
+                try {
+                    const pendingDevice = JSON.parse(pendingDeviceStr);
+                    const deviceNameInput = document.getElementById('deviceName');
+                    const ipInput = document.getElementById('ipAddress');
+                    
+                    if (deviceNameInput) {
+                        deviceNameInput.value = pendingDevice.description || '';
+                    }
+                    
+                    if (ipInput) {
+                        ipInput.value = 'Auto-configured';
+                        ipInput.disabled = true;
+                    }
+                    
+                    // Set device type based on discovered type
+                    if (pendingDevice.deviceType === 'sensor') {
+                        const sensorRadio = document.querySelector('input[name="deviceType"][value="sensor"]');
+                        if (sensorRadio) sensorRadio.checked = true;
+                    } else if (pendingDevice.deviceType === 'actuator') {
+                        const actuatorRadio = document.querySelector('input[name="deviceType"][value="actuator"]');
+                        if (actuatorRadio) actuatorRadio.checked = true;
+                    }
+                } catch (e) {
+                    console.error('Error loading pending device:', e);
+                }
+            }
         }
 
         // IP address formatting
         const ipInput = document.getElementById('ipAddress');
-        if (ipInput) {
+        if (ipInput && !ipInput.disabled) {
             ipInput.addEventListener('input', (e) => {
                 let value = e.target.value;
                 value = value.replace(/[^0-9.]/g, '');
@@ -488,14 +642,6 @@ class ESP32IoTSystem {
                 }
             });
         });
-
-        // Connect Wi-Fi button (for log data page)
-        const connectWifiBtn = document.querySelector('.connect-btn');
-        if (connectWifiBtn && window.location.pathname.includes('logdata.html')) {
-            connectWifiBtn.addEventListener('click', () => {
-                this.toggleWifiConnection();
-            });
-        }
     }
 
     // ==================== INTERACTIVE METHODS ====================
@@ -521,7 +667,7 @@ class ESP32IoTSystem {
         }
     }
 
-    async toggleConnection(button, deviceIP) {
+    async toggleConnection(button, deviceId) {
         const statusText = button.parentElement.querySelector('.status-text');
         const isConnected = button.classList.contains('disconnect-btn');
         
@@ -529,7 +675,7 @@ class ESP32IoTSystem {
         button.textContent = isConnected ? 'Disconnecting...' : 'Connecting...';
         
         try {
-            await this.updateDeviceStatus(deviceIP, isConnected ? 'disconnected' : 'connected');
+            await this.updateDeviceStatus(deviceId, isConnected ? 'disconnected' : 'connected');
             
             if (isConnected) {
                 button.textContent = 'connect';
@@ -564,39 +710,6 @@ class ESP32IoTSystem {
             deviceDetails.classList.add('show');
             icon.classList.add('expanded');
         }
-    }
-
-    toggleAction(button, action, deviceIP) {
-        const toggleButtons = button.parentElement;
-        const buttons = toggleButtons.querySelectorAll('.toggle-btn');
-        
-        buttons.forEach(btn => btn.style.opacity = '0.5');
-        button.style.opacity = '1';
-        
-        console.log(`Action ${action} activated for device ${deviceIP}`);
-        this.showNotification(`Action ${action.toUpperCase()} sent to device`, 'success');
-    }
-
-    toggleWifiConnection() {
-        const btn = event.target;
-        const isConnected = btn.textContent === 'Disconnect Wi-Fi';
-        
-        btn.disabled = true;
-        btn.textContent = isConnected ? 'Disconnecting...' : 'Connecting...';
-        
-        setTimeout(() => {
-            if (isConnected) {
-                btn.textContent = 'Connect Wi-Fi';
-                btn.style.background = '#4CAF50';
-                this.logData = [];
-                this.updateLogDataDisplay();
-            } else {
-                btn.textContent = 'Disconnect Wi-Fi';
-                btn.style.background = '#f44336';
-                this.loadLogData();
-            }
-            btn.disabled = false;
-        }, 2000);
     }
 
     // ==================== UTILITY METHODS ====================
@@ -668,32 +781,28 @@ function switchTab(tabName) {
     if (iotSystem) iotSystem.switchTab(tabName);
 }
 
-function toggleConnection(button, deviceIP) {
-    if (iotSystem) iotSystem.toggleConnection(button, deviceIP);
+function toggleConnection(button, deviceId) {
+    if (iotSystem) iotSystem.toggleConnection(button, deviceId);
 }
 
 function toggleExpand(icon) {
     if (iotSystem) iotSystem.toggleExpand(icon);
 }
 
-function toggleAction(button, action, deviceIP) {
-    if (iotSystem) iotSystem.toggleAction(button, action, deviceIP);
+function toggleAction(button, action, deviceId) {
+    if (iotSystem) iotSystem.sendCommand(deviceId, action);
 }
 
 function toggleScan() {
     if (iotSystem) iotSystem.startDeviceScan();
 }
 
-function connectToDevice(deviceIP) {
-    if (iotSystem) iotSystem.connectToDevice(deviceIP);
+function connectToDevice(deviceId) {
+    if (iotSystem) iotSystem.connectToDevice(deviceId);
 }
 
 function scanDevices() {
     if (iotSystem) iotSystem.startDeviceScan();
-}
-
-function connectWiFi() {
-    if (iotSystem) iotSystem.toggleWifiConnection();
 }
 
 // Handle page unload
