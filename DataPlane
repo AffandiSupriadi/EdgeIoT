@@ -1,19 +1,18 @@
 /*
- * Fixed Temperature & Humidity Sensor Implementation
+ * Temperature & Humidity Sensor Implementation with DUMMY DATA
+ * No real sensor readings - generates realistic dummy values
  * Compatible with SDNDataPlane library
  */
 
 #include "SDNDataPlane.h"
 
-// Sensor pins - Using ESP32 ADC capable pins
-#define TEMP_SENSOR_PIN 34        // GPIO34 (ADC1_CH6)
-#define HUMIDITY_SENSOR_PIN 35    // GPIO35 (ADC1_CH7)
-
 // Create specialized sensor class
 class TemperatureHumiditySensor : public SDNDataPlane {
 private:
-  float temperature = 0.0;
-  float humidity = 0.0;
+  float temperature = 25.0;  // Starting temperature
+  float humidity = 50.0;     // Starting humidity
+  float tempTrend = 0.1;     // Temperature change trend
+  float humidityTrend = 0.5; // Humidity change trend
   
 public:
   TemperatureHumiditySensor() : SDNDataPlane(80) {}
@@ -23,7 +22,7 @@ public:
     DeviceCapability cap;
     cap.deviceName = "Temperature & Humidity Sensor";
     cap.deviceType = "sensor";
-    cap.description = "ESP32 Temperature and Humidity Sensor";
+    cap.description = "ESP32 Temperature and Humidity Sensor (Dummy Data)";
     cap.firmwareVersion = "1.0.0";
     cap.hardwareVersion = "ESP32-WROOM-32";
     
@@ -57,22 +56,21 @@ public:
     // Set the capability
     setCapability(cap);
     
-    // Initialize sensor pins
-    pinMode(TEMP_SENSOR_PIN, INPUT);
-    pinMode(HUMIDITY_SENSOR_PIN, INPUT);
-    
     Serial.println("Temperature & Humidity Sensor initialized");
-    Serial.println("Using pins: Temp=" + String(TEMP_SENSOR_PIN) + ", Humidity=" + String(HUMIDITY_SENSOR_PIN));
+    Serial.println("Mode: DUMMY DATA (no real sensors)");
+    
+    // Seed random number generator
+    randomSeed(analogRead(0));
   }
   
   // Override the virtual method collectSensorData() from base class
   String collectSensorData() override {
-    // Read actual sensor values
-    readSensors();
+    // Generate dummy sensor values
+    generateDummyReadings();
     
     // Create sensor data response
     StaticJsonDocument<1024> data;
-    data["deviceId"] = getDeviceId();  // Use public method
+    data["deviceId"] = getDeviceId();
     data["deviceName"] = "Temperature & Humidity Sensor";
     data["timestamp"] = millis();
     
@@ -81,40 +79,54 @@ public:
     // Temperature reading
     JsonObject tempReading = readings.createNestedObject();
     tempReading["type"] = "temperature";
-    tempReading["value"] = temperature;
+    tempReading["value"] = roundToDecimals(temperature, 2);
     tempReading["unit"] = "°C";
     tempReading["status"] = "ok";
     
     // Humidity reading
     JsonObject humReading = readings.createNestedObject();
     humReading["type"] = "humidity";
-    humReading["value"] = humidity;
+    humReading["value"] = roundToDecimals(humidity, 1);
     humReading["unit"] = "%";
     humReading["status"] = "ok";
     
-    // Check memory usage
-    size_t memoryUsed = data.memoryUsage();
-    if (memoryUsed > 900) {
-      Serial.println("WARNING: JSON memory usage high: " + String(memoryUsed) + "/1024");
-    }
+    // Add metadata
+    JsonObject metadata = data.createNestedObject("metadata");
+    metadata["dataSource"] = "dummy";
+    metadata["sampleTime"] = millis();
     
     String response;
     serializeJson(data, response);
     return response;
   }
   
-  // Override executeCommand for actuator functionality (even though this is a sensor)
+  // Override executeCommand for actuator functionality
   bool executeCommand(String command, String value) override {
     Serial.println("Sensor received command: " + command + " = " + value);
     
-    // Sensors typically don't execute commands, but we can add some utility commands
     if (command == "reset") {
-      temperature = 0.0;
-      humidity = 0.0;
+      // Reset to default values
+      temperature = 25.0;
+      humidity = 50.0;
+      tempTrend = 0.1;
+      humidityTrend = 0.5;
+      Serial.println("Sensor values reset to defaults");
+      return true;
+    } else if (command == "set_temp") {
+      // Set temperature to specific value
+      temperature = value.toFloat();
+      temperature = constrain(temperature, -40.0, 85.0);
+      Serial.println("Temperature set to: " + String(temperature, 2) + "°C");
+      return true;
+    } else if (command == "set_humidity") {
+      // Set humidity to specific value
+      humidity = value.toFloat();
+      humidity = constrain(humidity, 0.0, 100.0);
+      Serial.println("Humidity set to: " + String(humidity, 1) + "%");
       return true;
     } else if (command == "calibrate") {
-      // Implement calibration logic here
-      Serial.println("Calibration command received");
+      // Dummy calibration
+      Serial.println("Calibration command received (dummy implementation)");
       return true;
     }
     
@@ -122,26 +134,56 @@ public:
   }
   
 private:
-  void readSensors() {
-    // Read temperature (simulated with analog reading)
-    int tempReading = analogRead(TEMP_SENSOR_PIN);
-    temperature = (float(tempReading) * 3.3f / 4095.0f) * 100.0f - 50.0f;
+  void generateDummyReadings() {
+    // Simulate realistic temperature variations
+    // Temperature follows a daily pattern with random variations
     
-    // Read humidity (simulated with analog reading)
-    int humidityReading = analogRead(HUMIDITY_SENSOR_PIN);
-    humidity = (float(humidityReading) * 3.3f / 4095.0f) * 100.0f;
+    // Get time-based variations (simulate daily temperature cycle)
+    unsigned long timeOfDay = (millis() / 1000) % 86400; // Seconds in day
+    float hourOfDay = timeOfDay / 3600.0;
     
-    // Add some realistic noise
-    temperature += random(-10, 10) / 10.0f;
-    humidity += random(-50, 50) / 10.0f;
+    // Base temperature varies throughout the day (sinusoidal pattern)
+    float baseTemp = 25.0 + 5.0 * sin((hourOfDay - 6) * PI / 12.0);
     
-    // Constrain values to realistic ranges
-    temperature = constrain(temperature, -40.0f, 85.0f);
-    humidity = constrain(humidity, 0.0f, 100.0f);
+    // Add random walk to temperature
+    tempTrend += random(-20, 21) / 100.0; // Change trend by -0.2 to +0.2
+    tempTrend = constrain(tempTrend, -0.5, 0.5); // Limit trend
+    temperature += tempTrend;
     
-    Serial.println("Sensor Readings:");
+    // Gradually move toward base temperature
+    temperature = temperature * 0.95 + baseTemp * 0.05;
+    
+    // Add small random noise
+    temperature += random(-10, 11) / 20.0; // -0.5 to +0.5 noise
+    
+    // Constrain to realistic range
+    temperature = constrain(temperature, 15.0, 35.0);
+    
+    // Humidity inversely related to temperature with random variations
+    float targetHumidity = 80.0 - (temperature - 15.0) * 2.0;
+    
+    // Add random walk to humidity
+    humidityTrend += random(-50, 51) / 100.0; // Change trend by -0.5 to +0.5
+    humidityTrend = constrain(humidityTrend, -2.0, 2.0);
+    humidity += humidityTrend;
+    
+    // Gradually move toward target humidity
+    humidity = humidity * 0.9 + targetHumidity * 0.1;
+    
+    // Add random noise
+    humidity += random(-20, 21) / 10.0; // -2.0 to +2.0 noise
+    
+    // Constrain to valid range
+    humidity = constrain(humidity, 20.0, 90.0);
+    
+    Serial.println("Dummy Sensor Readings:");
     Serial.println("  Temperature: " + String(temperature, 2) + "°C");
-    Serial.println("  Humidity: " + String(humidity, 2) + "%");
+    Serial.println("  Humidity: " + String(humidity, 1) + "%");
+  }
+  
+  float roundToDecimals(float value, int decimals) {
+    float multiplier = pow(10.0, decimals);
+    return round(value * multiplier) / multiplier;
   }
 };
 
@@ -168,9 +210,7 @@ void setup() {
   delay(1000); // Wait for serial to initialize
   
   Serial.println("\n=== Temperature & Humidity Sensor Starting ===");
-  
-  // Configure ADC resolution for ESP32
-  analogReadResolution(12); // 12-bit resolution (0-4095)
+  Serial.println("=== DUMMY DATA MODE - No Real Sensors ===");
   
   // Initialize sensor-specific features
   sensor.initializeSensor();
@@ -181,27 +221,42 @@ void setup() {
   // Start SDN Data Plane
   sensor.begin();
   
-  Serial.println("Sensor ready!");
+  Serial.println("\nSensor ready!");
   Serial.println("Initial Mode: AP (waiting for Control Plane discovery)");
-  Serial.println("ESP32 ADC Resolution: 12-bit");
   Serial.println("Device ID: " + sensor.getDeviceId());
+  Serial.println("\nDummy data will be generated with realistic patterns:");
+  Serial.println("- Temperature follows daily cycle (cooler at night)");
+  Serial.println("- Humidity inversely related to temperature");
+  Serial.println("- Random variations for realistic data");
 }
 
 void loop() {
   // Main SDN Data Plane loop
   sensor.loop();
   
-  // Additional sensor-specific code can go here
   // The library will automatically handle:
   // - Web server requests
   // - Configuration management
   // - Data transmission to control plane
   // - State management
+  // - Dummy data generation when needed
   
   delay(10); // Small delay to prevent watchdog issues
 }
 
 /*
+ * DUMMY DATA CHARACTERISTICS:
+ * - Temperature: 15-35°C range with daily cycle
+ * - Humidity: 20-90% range, inversely related to temperature
+ * - Realistic variations and noise
+ * - Gradual changes (no sudden jumps)
+ * 
+ * COMMANDS SUPPORTED:
+ * - reset: Reset to default values (25°C, 50%)
+ * - set_temp: Set temperature to specific value
+ * - set_humidity: Set humidity to specific value
+ * - calibrate: Dummy calibration command
+ * 
  * Expected Flow:
  * 1. Sensor boots in AP mode: "ESP32_Device_XXXX"
  * 2. Control Plane scans WiFi, finds this AP
@@ -210,11 +265,5 @@ void loop() {
  * 5. Control Plane sends configuration via POST /api/config
  * 6. Sensor switches to STA mode and connects to main network
  * 7. Sensor automatically registers with Control Plane
- * 8. Sensor starts sending data based on configured interval
- * 
- * Debug via Serial Monitor:
- * - Device state transitions
- * - Sensor readings
- * - Network events
- * - Command executions
+ * 8. Sensor starts sending dummy data based on configured interval
  */
