@@ -811,3 +811,443 @@ window.addEventListener('beforeunload', () => {
         iotSystem.stopAutoRefresh();
     }
 });
+// ==================== ENHANCED FRONTEND JAVASCRIPT ====================
+// Enhanced discovery and device management
+
+let discoveredDevices = [];
+let configuredDevices = [];
+let isScanning = false;
+
+// Enhanced WiFi scanning with two-phase discovery
+function scanWiFi() {
+    if (isScanning) {
+        showMessage('Scanning already in progress...', 'warning');
+        return;
+    }
+    
+    isScanning = true;
+    showMessage('Scanning for IoT devices...', 'info');
+    
+    // Clear current results
+    document.getElementById('wifiResults').innerHTML = '';
+    discoveredDevices = [];
+    
+    // Update button state
+    const scanBtn = document.getElementById('scanBtn');
+    const originalText = scanBtn.textContent;
+    scanBtn.textContent = 'Scanning...';
+    scanBtn.disabled = true;
+    
+    // Use quick scan for better UX
+    fetch('/api/quick-scan')
+        .then(response => response.json())
+        .then(data => {
+            if (data.devices && data.devices.length > 0) {
+                showMessage(`Found ${data.devices.length} potential devices`, 'success');
+                displayQuickScanResults(data.devices);
+            } else {
+                showMessage('No IoT devices found', 'warning');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showMessage('Error scanning for devices: ' + error.message, 'error');
+        })
+        .finally(() => {
+            isScanning = false;
+            scanBtn.textContent = originalText;
+            scanBtn.disabled = false;
+        });
+}
+
+// Display quick scan results with option to get detailed info
+function displayQuickScanResults(devices) {
+    const resultsDiv = document.getElementById('wifiResults');
+    resultsDiv.innerHTML = '';
+    
+    devices.forEach(device => {
+        const deviceDiv = document.createElement('div');
+        deviceDiv.className = 'device-item';
+        deviceDiv.innerHTML = `
+            <div class="device-header">
+                <h3>${device.ssid}</h3>
+                <span class="signal-strength ${getSignalClass(device.rssi)}">${device.rssi} dBm</span>
+            </div>
+            <div class="device-info">
+                <p><strong>Status:</strong> <span class="status-badge ${device.configured ? 'configured' : 'unconfigured'}">${device.configured ? 'Configured' : 'Needs Configuration'}</span></p>
+                <div class="device-details" id="details-${device.ssid}" style="display: none;">
+                    <p class="loading">Loading device information...</p>
+                </div>
+            </div>
+            <div class="device-actions">
+                <button onclick="getDeviceInfo('${device.ssid}')" class="btn btn-info">Get Info</button>
+                <button onclick="showConfigModal('${device.ssid}')" class="btn btn-primary">Configure</button>
+            </div>
+        `;
+        resultsDiv.appendChild(deviceDiv);
+    });
+}
+
+// Get detailed device information
+function getDeviceInfo(ssid) {
+    const detailsDiv = document.getElementById(`details-${ssid}`);
+    detailsDiv.style.display = 'block';
+    detailsDiv.innerHTML = '<p class="loading">Loading device information...</p>';
+    
+    fetch(`/api/device-info?ssid=${encodeURIComponent(ssid)}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                detailsDiv.innerHTML = `
+                    <div class="device-details-content">
+                        <p><strong>Device ID:</strong> ${data.deviceId}</p>
+                        <p><strong>Device Type:</strong> ${data.deviceType}</p>
+                        <p><strong>Description:</strong> ${data.description}</p>
+                        <p><strong>Firmware:</strong> ${data.firmwareVersion}</p>
+                        <p><strong>Status:</strong> ${data.configured ? 'Configured' : 'Unconfigured'}</p>
+                    </div>
+                `;
+                
+                // Store device info for configuration
+                const deviceInfo = {
+                    ssid: ssid,
+                    deviceId: data.deviceId,
+                    deviceType: data.deviceType,
+                    description: data.description,
+                    firmwareVersion: data.firmwareVersion,
+                    configured: data.configured
+                };
+                
+                // Update or add to discovered devices
+                const existingIndex = discoveredDevices.findIndex(d => d.ssid === ssid);
+                if (existingIndex >= 0) {
+                    discoveredDevices[existingIndex] = deviceInfo;
+                } else {
+                    discoveredDevices.push(deviceInfo);
+                }
+            } else {
+                detailsDiv.innerHTML = `<p class="error">Failed to get device info: ${data.message}</p>`;
+            }
+        })
+        .catch(error => {
+            console.error('Error getting device info:', error);
+            detailsDiv.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+        });
+}
+
+// Enhanced device configuration modal
+function showConfigModal(ssid) {
+    const device = discoveredDevices.find(d => d.ssid === ssid);
+    
+    if (!device || !device.deviceId) {
+        showMessage('Please get device info first', 'warning');
+        return;
+    }
+    
+    const modal = document.getElementById('configModal');
+    const deviceIdSpan = document.getElementById('configDeviceId');
+    const deviceNameInput = document.getElementById('deviceName');
+    const deviceTypeSelect = document.getElementById('deviceType');
+    const readIntervalInput = document.getElementById('readInterval');
+    
+    deviceIdSpan.textContent = device.deviceId;
+    deviceNameInput.value = device.configured ? device.deviceId : `${device.deviceType}_${device.deviceId.slice(-4)}`;
+    deviceTypeSelect.value = device.deviceType || 'sensor';
+    readIntervalInput.value = '5';
+    
+    modal.style.display = 'block';
+    
+    // Store current device for configuration
+    window.currentConfigDevice = device;
+}
+
+// Enhanced device configuration
+function configureDevice() {
+    const device = window.currentConfigDevice;
+    if (!device) {
+        showMessage('No device selected for configuration', 'error');
+        return;
+    }
+    
+    const deviceName = document.getElementById('deviceName').value.trim();
+    const deviceType = document.getElementById('deviceType').value;
+    const readInterval = parseInt(document.getElementById('readInterval').value);
+    
+    if (!deviceName) {
+        showMessage('Device name is required', 'error');
+        return;
+    }
+    
+    if (readInterval < 1 || readInterval > 3600) {
+        showMessage('Read interval must be between 1 and 3600 seconds', 'error');
+        return;
+    }
+    
+    const configBtn = document.getElementById('configBtn');
+    configBtn.disabled = true;
+    configBtn.textContent = 'Configuring...';
+    
+    showMessage('Configuring device, please wait...', 'info');
+    
+    const configData = {
+        deviceId: device.deviceId,
+        deviceName: deviceName,
+        deviceType: deviceType,
+        readInterval: readInterval
+    };
+    
+    fetch('/api/config', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(configData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showMessage('Device configured successfully!', 'success');
+            closeConfigModal();
+            
+            // Refresh device list after configuration
+            setTimeout(() => {
+                loadDevices();
+            }, 3000);
+        } else {
+            showMessage('Configuration failed: ' + data.message, 'error');
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showMessage('Error configuring device: ' + error.message, 'error');
+    })
+    .finally(() => {
+        configBtn.disabled = false;
+        configBtn.textContent = 'Configure Device';
+    });
+}
+
+// Enhanced device list loading
+function loadDevices() {
+    showMessage('Loading devices...', 'info');
+    
+    fetch('/api/devices')
+        .then(response => response.json())
+        .then(data => {
+            configuredDevices = data.devices || [];
+            displayDeviceList(configuredDevices);
+            
+            if (configuredDevices.length === 0) {
+                showMessage('No configured devices found', 'warning');
+            } else {
+                showMessage(`Loaded ${configuredDevices.length} devices`, 'success');
+            }
+        })
+        .catch(error => {
+            console.error('Error loading devices:', error);
+            showMessage('Error loading devices: ' + error.message, 'error');
+        });
+}
+
+// Enhanced device list display
+function displayDeviceList(devices) {
+    const deviceListDiv = document.getElementById('deviceList');
+    deviceListDiv.innerHTML = '';
+    
+    if (devices.length === 0) {
+        deviceListDiv.innerHTML = '<p class="no-devices">No devices configured yet.</p>';
+        return;
+    }
+    
+    devices.forEach(device => {
+        const deviceDiv = document.createElement('div');
+        deviceDiv.className = `device-card ${device.connected ? 'connected' : 'disconnected'}`;
+        
+        const lastSeenTime = device.lastHeartbeat ? 
+            new Date(parseInt(device.lastHeartbeat)).toLocaleString() : 
+            'Never';
+        
+        deviceDiv.innerHTML = `
+            <div class="device-card-header">
+                <h3>${device.name}</h3>
+                <span class="connection-status ${device.connected ? 'connected' : 'disconnected'}">
+                    ${device.connected ? 'Connected' : 'Disconnected'}
+                </span>
+            </div>
+            <div class="device-card-body">
+                <div class="device-info-grid">
+                    <div class="info-item">
+                        <label>Device ID:</label>
+                        <span>${device.id}</span>
+                    </div>
+                    <div class="info-item">
+                        <label>Type:</label>
+                        <span>${device.type}</span>
+                    </div>
+                    <div class="info-item">
+                        <label>IP Address:</label>
+                        <span>${device.ip || 'N/A'}</span>
+                    </div>
+                    <div class="info-item">
+                        <label>Read Interval:</label>
+                        <span>${device.readInterval}s</span>
+                    </div>
+                    <div class="info-item">
+                        <label>Last Seen:</label>
+                        <span>${lastSeenTime}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="device-card-actions">
+                <button onclick="viewDeviceData('${device.id}')" class="btn btn-info">View Data</button>
+                <button onclick="removeDevice('${device.id}')" class="btn btn-danger">Remove</button>
+            </div>
+        `;
+        
+        deviceListDiv.appendChild(deviceDiv);
+    });
+}
+
+// Enhanced device data viewing
+function viewDeviceData(deviceId) {
+    const device = configuredDevices.find(d => d.id === deviceId);
+    if (!device) {
+        showMessage('Device not found', 'error');
+        return;
+    }
+    
+    showMessage('Loading device data...', 'info');
+    
+    fetch(`/api/device-data?deviceId=${encodeURIComponent(deviceId)}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.data) {
+                displayDeviceDataModal(device, data.data);
+            } else {
+                showMessage('No data available for this device', 'warning');
+            }
+        })
+        .catch(error => {
+            console.error('Error loading device data:', error);
+            showMessage('Error loading device data: ' + error.message, 'error');
+        });
+}
+
+// Display device data in modal
+function displayDeviceDataModal(device, data) {
+    const modal = document.getElementById('dataModal');
+    const deviceNameSpan = document.getElementById('dataDeviceName');
+    const dataContainer = document.getElementById('dataContainer');
+    
+    deviceNameSpan.textContent = device.name;
+    
+    if (data.length === 0) {
+        dataContainer.innerHTML = '<p>No data available</p>';
+    } else {
+        dataContainer.innerHTML = `
+            <div class="data-summary">
+                <p><strong>Total Records:</strong> ${data.length}</p>
+                <p><strong>Latest Reading:</strong> ${new Date(data[0].timestamp).toLocaleString()}</p>
+            </div>
+            <div class="data-table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Data</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.slice(0, 50).map(record => `
+                            <tr>
+                                <td>${new Date(record.timestamp).toLocaleString()}</td>
+                                <td>${JSON.stringify(record.data, null, 2)}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+    
+    modal.style.display = 'block';
+}
+
+// Enhanced device removal
+function removeDevice(deviceId) {
+    if (!confirm('Are you sure you want to remove this device?')) {
+        return;
+    }
+    
+    showMessage('Removing device...', 'info');
+    
+    fetch(`/api/device?deviceId=${encodeURIComponent(deviceId)}`, {
+        method: 'DELETE'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showMessage('Device removed successfully', 'success');
+            loadDevices();
+        } else {
+            showMessage('Failed to remove device: ' + data.message, 'error');
+        }
+    })
+    .catch(error => {
+        console.error('Error removing device:', error);
+        showMessage('Error removing device: ' + error.message, 'error');
+    });
+}
+
+// Utility functions
+function getSignalClass(rssi) {
+    if (rssi >= -50) return 'excellent';
+    if (rssi >= -60) return 'good';
+    if (rssi >= -70) return 'fair';
+    return 'poor';
+}
+
+function showMessage(message, type = 'info') {
+    const messageDiv = document.getElementById('message');
+    messageDiv.textContent = message;
+    messageDiv.className = `message ${type}`;
+    messageDiv.style.display = 'block';
+    
+    setTimeout(() => {
+        messageDiv.style.display = 'none';
+    }, 5000);
+}
+
+function closeConfigModal() {
+    document.getElementById('configModal').style.display = 'none';
+    window.currentConfigDevice = null;
+}
+
+function closeDataModal() {
+    document.getElementById('dataModal').style.display = 'none';
+}
+
+// Modal close handlers
+window.onclick = function(event) {
+    const configModal = document.getElementById('configModal');
+    const dataModal = document.getElementById('dataModal');
+    
+    if (event.target === configModal) {
+        closeConfigModal();
+    }
+    if (event.target === dataModal) {
+        closeDataModal();
+    }
+}
+
+// Auto-refresh device list every 30 seconds
+setInterval(() => {
+    if (document.getElementById('deviceList').children.length > 0) {
+        loadDevices();
+    }
+}, 30000);
+
+// Initialize page
+document.addEventListener('DOMContentLoaded', function() {
+    loadDevices();
+});
